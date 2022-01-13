@@ -25,30 +25,18 @@ enum class Adjacent
     Parent
 };
 
-Adjacent reverse(Adjacent direction)
+Adjacent reverse(Adjacent adjacent)
 {
-    Adjacent reversed_direction = Adjacent::None;
-
-    switch (direction)
+    switch (adjacent)
     {
-    case Adjacent::FirstChild:
-        reversed_direction = Adjacent::Parent;
-        break;
-    case Adjacent::NextSibling:
-        reversed_direction = Adjacent::PreviousSibling;
-        break;
-    case Adjacent::PreviousSibling:
-        reversed_direction = Adjacent::NextSibling;
-        break;
-    case Adjacent::Parent:
-        reversed_direction = Adjacent::FirstChild;
-        break;
-    default:
-        BOOST_ASSERT(0);
-        break;
+    case Adjacent::FirstChild:      return Adjacent::Parent;            break;
+    case Adjacent::NextSibling:     return Adjacent::PreviousSibling;   break;
+    case Adjacent::PreviousSibling: return Adjacent::NextSibling;       break;
+    case Adjacent::Parent:          return Adjacent::FirstChild;        break;
     }
 
-    return reversed_direction;
+    BOOST_ASSERT(0);
+    return Adjacent::None;
 }
 
 class DocNode : public boost::enable_shared_from_this<DocNode>
@@ -62,8 +50,8 @@ public:
 public:
     std::string value() const;
 
-    shared_ptr_t adjacent_node(Adjacent direction) const;
-    void set_adjacent_node(Adjacent direction, shared_ptr_t node);
+    shared_ptr_t adjacent_node(Adjacent adjacent) const;
+    void set_adjacent_node(Adjacent adjacent, shared_ptr_t node, bool build_reversed_link);
 
 private:
     std::string value_;
@@ -80,9 +68,9 @@ std::string DocNode::value() const
     return value_;
 }
 
-DocNode::shared_ptr_t DocNode::adjacent_node(Adjacent direction) const
+DocNode::shared_ptr_t DocNode::adjacent_node(Adjacent adjacent) const
 {
-    auto itr = adjacent_nodes_.find(direction);
+    auto itr = adjacent_nodes_.find(adjacent);
     if (itr != adjacent_nodes_.end())
     {
         return itr->second;
@@ -91,19 +79,23 @@ DocNode::shared_ptr_t DocNode::adjacent_node(Adjacent direction) const
     return DocNode::shared_ptr_t();
 }
 
-void DocNode::set_adjacent_node(Adjacent direction, shared_ptr_t node)
+void DocNode::set_adjacent_node(Adjacent adjacent, shared_ptr_t node, bool double_linked)
 {
-    if (adjacent_nodes_.count(direction) > 0)
+    if (adjacent_nodes_.count(adjacent) > 0)
     {
         BOOST_ASSERT(0);
         return;
     }
 
-    adjacent_nodes_[direction] = node;
-    auto reversed_direction = reverse(direction);
-    if (node && !node->adjacent_node(reversed_direction))
+    adjacent_nodes_[adjacent] = node;
+
+    if (double_linked)
     {
-        node->set_adjacent_node(reversed_direction, shared_from_this());
+        auto reversed_adjacent = reverse(adjacent);
+        if (node && !node->adjacent_node(reversed_adjacent))
+        {
+            node->set_adjacent_node(reversed_adjacent, shared_from_this(), false);
+        }
     }
 }
 
@@ -117,37 +109,39 @@ std::string get_value(const std::string & new_doc_tag)
 
 DocNode::shared_ptr_t build_dom(std::istream & is)
 {
-    std::stack<DocNode::shared_ptr_t> dom_nodes;
     DocNode::shared_ptr_t root_node;
     DocNode::shared_ptr_t previous_sibling;
+    std::stack<DocNode::shared_ptr_t> opened_nodes;
 
-    std::string line;
-    std::getline(is, line);
-    size_t line_count = boost::lexical_cast<size_t>(line);
+    std::string line_buffer;
+    std::getline(is, line_buffer);
+    size_t line_count = boost::lexical_cast<size_t>(line_buffer);
 
     for (size_t i = 0; i < line_count; ++i)
     {
-        std::getline(is, line);
+        std::getline(is, line_buffer);
 
-        if (line == END_OF_DOC)
+        if (line_buffer == END_OF_DOC)
         {
-            previous_sibling = dom_nodes.empty() ? nullptr : dom_nodes.top();
-            dom_nodes.pop();
+            BOOST_ASSERT(!opened_nodes.empty());
+            previous_sibling = opened_nodes.top();
+            opened_nodes.pop();
         }
         else
         {
-            auto current = boost::make_shared<DocNode>(get_value(line));
-            current->set_adjacent_node(Adjacent::Parent, dom_nodes.empty() ? nullptr : dom_nodes.top());
-            current->set_adjacent_node(Adjacent::PreviousSibling, previous_sibling);
+            auto current_node = boost::make_shared<DocNode>(get_value(line_buffer));
+            current_node->set_adjacent_node(Adjacent::Parent, opened_nodes.empty() ? nullptr : opened_nodes.top(), true);
+            current_node->set_adjacent_node(Adjacent::PreviousSibling, previous_sibling, true);
 
-            dom_nodes.push(current);
+            opened_nodes.push(current_node);
             if (!root_node)
             {
-                root_node = current;
+                root_node = current_node;
             }
         }
     }
 
+    BOOST_ASSERT(opened_nodes.empty());
     return root_node;
 }
 
@@ -160,30 +154,30 @@ std::vector<Adjacent> get_instructions(std::istream & is)
 
     for (size_t i = 0; i < instruction_count; ++i)
     {
-        Adjacent direction = Adjacent::None;
+        Adjacent adjacent = Adjacent::None;
 
         std::string instruction;
         is >> instruction;
 
         if (instruction == "first_child")
         {
-            direction = Adjacent::FirstChild;
+            adjacent = Adjacent::FirstChild;
         }
         else if (instruction == "next_sibling")
         {
-            direction = Adjacent::NextSibling;
+            adjacent = Adjacent::NextSibling;
         }
         else if (instruction == "previous_sibling")
         {
-            direction = Adjacent::PreviousSibling;
+            adjacent = Adjacent::PreviousSibling;
         }
         else if (instruction == "parent")
         {
-            direction = Adjacent::Parent;
+            adjacent = Adjacent::Parent;
         }
 
-        BOOST_ASSERT(direction != Adjacent::None);
-        instructions.push_back(direction);
+        BOOST_ASSERT(adjacent != Adjacent::None);
+        instructions.push_back(adjacent);
     }
 
     return instructions;
@@ -196,16 +190,16 @@ void solve_dom_problem(std::istream & is, std::ostream & os)
 
     while (true)
     {
-        std::vector<Adjacent> directions = get_instructions(is);
-        if (directions.empty())
+        std::vector<Adjacent> adjacents = get_instructions(is);
+        if (adjacents.empty())
         {
             break;
         }
 
         os << "Case " << boost::lexical_cast<std::string>(++case_number) << ":" << std::endl;
-        for (auto & direction : directions)
+        for (auto & adjacent : adjacents)
         {
-            auto next_node = current_node->adjacent_node(direction);
+            auto next_node = current_node->adjacent_node(adjacent);
             if (next_node)
             {
                 current_node = next_node;
